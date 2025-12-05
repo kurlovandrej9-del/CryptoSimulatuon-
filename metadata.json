@@ -1,0 +1,5 @@
+{
+  "name": "CryptoSim Live",
+  "description": "Real-time cryptocurrency price simulation with target price and duration controls.",
+  "requestFramePermissions": []
+}
