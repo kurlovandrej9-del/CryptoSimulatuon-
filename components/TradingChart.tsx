@@ -18,6 +18,10 @@ interface TradingChartProps {
   activeTimeFrame: TimeFrame;
   onTimeFrameChange: (tf: TimeFrame) => void;
   isWidget?: boolean;
+  widgetOptions?: {
+      showHeader: boolean;
+      showTimeframes: boolean;
+  }
 }
 
 export const TradingChart: React.FC<TradingChartProps> = ({ 
@@ -26,7 +30,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   symbol,
   activeTimeFrame,
   onTimeFrameChange,
-  isWidget = false
+  isWidget = false,
+  widgetOptions = { showHeader: true, showTimeframes: false }
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   
@@ -154,7 +159,6 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     if (isDragging) {
         const containerWidth = containerRef.current?.clientWidth || 1;
         const duration = xDomain[1] - xDomain[0];
-        // Reduced sensitivity for smoother panning
         const msPerPx = duration / containerWidth;
         const timeShift = dx * msPerPx; 
 
@@ -162,7 +166,6 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     }
 
     if (isResizingY && yDomain) {
-        // Reduced sensitivity for smoother Y scaling
         const scaleFactor = 1 + (dy * 0.002); 
         const currentMin = yDomain[0];
         const currentMax = yDomain[1];
@@ -182,13 +185,11 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
   const handleWheel = (e: React.WheelEvent) => {
     if (!xDomain) return;
-    e.preventDefault(); // Stop page scrolling
+    e.preventDefault(); 
     const containerWidth = containerRef.current?.clientWidth || 0;
     const isOverYAxis = e.nativeEvent.offsetX > containerWidth - 60;
 
-    // Smoother zoom factor
     const delta = Math.sign(e.deltaY);
-    // 5% zoom per tick
     const zoomFactor = delta > 0 ? 1.05 : 0.95; 
 
     if (isOverYAxis) {
@@ -200,13 +201,11 @@ export const TradingChart: React.FC<TradingChartProps> = ({
        const newRange = range * zoomFactor;
        setYDomain([center - newRange / 2, center + newRange / 2]);
     } else {
-        // Zoom X
-        if (isAutoScroll) setIsAutoScroll(true); // Don't break auto-scroll on zoom unless pan
+        if (isAutoScroll) setIsAutoScroll(true);
         
         const duration = xDomain[1] - xDomain[0];
-        const newDuration = Math.max(10000, duration * zoomFactor); // Min 10 seconds
+        const newDuration = Math.max(10000, duration * zoomFactor);
         
-        // Zoom towards center of view or right edge if autoscroll
         if (isAutoScroll) {
              const lastTime = data[data.length - 1].time;
              setXDomain([lastTime - newDuration, lastTime]);
@@ -221,37 +220,30 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   
   const visibleData = useMemo(() => {
     if (!xDomain || data.length === 0) return data.slice(-100);
-    // Buffer for smooth scrolling
     const duration = xDomain[1] - xDomain[0];
     const minTime = xDomain[0] - duration * 0.5;
     const maxTime = xDomain[1] + duration * 0.5;
     
-    // Binary search or simple filter (simple filter ok for < 5000 points)
-    // Optimization: find start index
     const startIndex = data.findIndex(d => d.time >= minTime);
     if (startIndex === -1) return [];
     
-    // We can just slice from startIndex
     return data.slice(startIndex).filter(d => d.time <= maxTime);
   }, [data, xDomain]);
 
   const chartYDomain = useMemo(() => {
     if (!isAutoY && yDomain) return yDomain;
-    
     if (visibleData.length === 0) return [0, 100];
     
-    // Calculate Min/Max of visible data
     let min = Infinity;
     let max = -Infinity;
     
-    // Performance loop
     for (let i = 0; i < visibleData.length; i++) {
         const p = visibleData[i].price;
         if (p < min) min = p;
         if (p > max) max = p;
     }
     
-    const padding = (max - min) * 0.15; // 15% padding
+    const padding = (max - min) * 0.15;
     
     if (min === Infinity) return [0, 100];
     if (min === max) return [min * 0.9, max * 1.1];
@@ -260,32 +252,44 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   }, [visibleData, isAutoY, yDomain]);
 
   const currentPrice = data.length > 0 ? data[data.length - 1].price : 0;
+  
+  // Decide what UI to show
+  const showTopBar = !isWidget || (isWidget && widgetOptions.showTimeframes);
+  const showHeaderWidget = isWidget && widgetOptions.showHeader;
 
   return (
-    <div className={`flex flex-col h-full select-none ${isWidget ? 'bg-transparent' : 'bg-slate-950'}`}>
-      {/* Top Bar - Hide specialized controls in widget mode to keep it clean, or keep minimal */}
-      {!isWidget && (
-      <div className="flex items-center justify-between px-3 py-2 border-b border-slate-800 bg-slate-900/50">
+    <div className={`flex flex-col h-full select-none ${isWidget ? '' : 'bg-slate-950'}`}>
+      
+      {/* Top Bar: Timeframes & Controls */}
+      {showTopBar && (
+      <div className={`flex items-center justify-between px-3 py-2 ${isWidget ? 'bg-transparent' : 'border-b border-slate-800 bg-slate-900/50'}`}>
         <div className="flex items-center gap-4 overflow-x-auto no-scrollbar">
-          <h1 className="text-sm md:text-base font-bold text-slate-200 tracking-wider whitespace-nowrap flex items-center gap-2">
-            {symbol} <span className="text-slate-600 font-normal">/ USD</span>
-          </h1>
-          <div className="h-4 w-px bg-slate-800 shrink-0"></div>
-          <div className="flex gap-0.5 shrink-0 bg-slate-900 rounded-lg p-0.5 border border-slate-800">
-            {Object.values(TimeFrame).map((tf) => (
-              <button
-                key={tf}
-                onClick={() => setTimeFrame(tf)}
-                className={`px-3 py-1 text-[11px] font-medium rounded-md transition-all ${
-                  activeTimeFrame === tf 
-                    ? 'bg-slate-700 text-emerald-400 shadow-sm' 
-                    : 'text-slate-500 hover:text-slate-300 hover:bg-slate-800'
-                }`}
-              >
-                {tf}
-              </button>
-            ))}
-          </div>
+          {(!isWidget) && (
+             <h1 className="text-sm md:text-base font-bold text-slate-200 tracking-wider whitespace-nowrap flex items-center gap-2">
+                {symbol} <span className="text-slate-600 font-normal">/ USD</span>
+             </h1>
+          )}
+          
+          {(!isWidget || widgetOptions.showTimeframes) && (
+          <>
+            {!isWidget && <div className="h-4 w-px bg-slate-800 shrink-0"></div>}
+            <div className={`flex gap-0.5 shrink-0 rounded-lg p-0.5 ${isWidget ? 'bg-black/20' : 'bg-slate-900 border border-slate-800'}`}>
+                {Object.values(TimeFrame).map((tf) => (
+                <button
+                    key={tf}
+                    onClick={() => setTimeFrame(tf)}
+                    className={`px-3 py-1 text-[11px] font-medium rounded-md transition-all ${
+                    activeTimeFrame === tf 
+                        ? 'bg-slate-700/80 text-emerald-400 shadow-sm' 
+                        : 'text-slate-500 hover:text-slate-300 hover:bg-slate-800/50'
+                    }`}
+                >
+                    {tf}
+                </button>
+                ))}
+            </div>
+          </>
+          )}
         </div>
         
         <div className="flex items-center gap-2 pl-2">
@@ -309,10 +313,10 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       </div>
       )}
 
-      {/* Simplified Header for Widget */}
-      {isWidget && (
-        <div className="flex items-center justify-between px-3 py-1 bg-slate-900/80 backdrop-blur-sm border-b border-slate-800/50">
-            <span className="text-xs font-bold text-slate-200">{symbol} / USD</span>
+      {/* Widget Only Header (Simplified) */}
+      {showHeaderWidget && !showTopBar && (
+        <div className="flex items-center justify-between px-3 py-1.5 border-b border-slate-800/10">
+            <span className="text-xs font-bold opacity-80">{symbol} / USD</span>
             <span className={`text-xs font-mono ${data.length > 1 && data[data.length-1].price >= data[data.length-2].price ? 'text-emerald-400' : 'text-rose-400'}`}>
                 ${currentPrice.toFixed(2)}
             </span>
@@ -340,14 +344,14 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                 <stop offset="95%" stopColor={color} stopOpacity={0} />
               </linearGradient>
             </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} opacity={0.5} />
+            <CartesianGrid strokeDasharray="3 3" stroke="#64748b" vertical={false} opacity={0.1} />
             <XAxis 
               dataKey="time" 
               type="number"
               domain={xDomain || ['auto', 'auto']}
               tickFormatter={formatTime} 
-              stroke="#334155"
-              tick={{ fill: '#64748b', fontSize: 10, fontFamily: 'monospace' }}
+              stroke="#64748b"
+              tick={{ fill: '#64748b', fontSize: 10, fontFamily: 'monospace', opacity: 0.7 }}
               minTickGap={60}
               allowDataOverflow={true}
               height={30}
@@ -360,9 +364,9 @@ export const TradingChart: React.FC<TradingChartProps> = ({
               type="number"
               domain={chartYDomain} 
               tickFormatter={(val) => val.toFixed(2)}
-              stroke="#334155"
+              stroke="#64748b"
               orientation="right"
-              tick={{ fill: '#64748b', fontSize: 10, fontFamily: 'monospace' }}
+              tick={{ fill: '#64748b', fontSize: 10, fontFamily: 'monospace', opacity: 0.7 }}
               width={60}
               allowDataOverflow={true}
               mirror={false}
@@ -409,7 +413,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                     }px`
                 }}
             >
-                <div className={`h-[1px] w-full border-t border-dashed opacity-40 ${currentPrice > (visibleData[visibleData.length-50]?.price || 0) ? 'border-emerald-500' : 'border-rose-500'}`}></div>
+                <div className={`h-[1px] w-full border-t border-dashed opacity-40 ${currentPrice > (visibleData[visibleData.length-50]?.price || 0) ? 'border-emerald-500' : 'border-rose-500'}`} style={{ borderColor: color }}></div>
             </div>
         )}
 
@@ -419,7 +423,6 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             className="absolute top-0 right-0 bottom-[30px] w-[60px] cursor-ns-resize hover:bg-white/5 transition-colors border-l border-slate-800/50"
             title="Тяните для масштабирования цены"
         >
-            {/* Current Price Label on Axis */}
             <div 
                 className="absolute right-0 w-[60px] flex items-center justify-center pointer-events-none z-10"
                 style={{ 
@@ -449,7 +452,10 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                     }px`
                 }}
             >
-                 <div className={`text-[10px] font-mono font-bold px-1 py-0.5 rounded text-white ${currentPrice > (visibleData[visibleData.length-50]?.price || 0) ? 'bg-emerald-600' : 'bg-rose-600'}`}>
+                 <div 
+                    className="text-[10px] font-mono font-bold px-1 py-0.5 rounded text-white"
+                    style={{ backgroundColor: color }}
+                 >
                     {currentPrice.toFixed(2)}
                 </div>
             </div>
