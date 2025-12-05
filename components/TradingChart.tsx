@@ -231,7 +231,6 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     const startIndex = data.findIndex(d => d.time >= minTime);
     if (startIndex === -1) return [];
     
-    let endIndex = data.length;
     // We can just slice from startIndex
     return data.slice(startIndex).filter(d => d.time <= maxTime);
   }, [data, xDomain]);

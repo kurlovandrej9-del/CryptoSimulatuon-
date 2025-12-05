@@ -1,6 +1,6 @@
 import React from 'react';
 import { Coin } from '../types';
-import { TrendingUp, Search } from 'lucide-react';
+import { Search } from 'lucide-react';
 
 interface CoinListProps {
   coins: Coin[];
