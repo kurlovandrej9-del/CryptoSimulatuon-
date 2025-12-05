@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
-import { Play, Square, Timer, Target, AlertTriangle, Activity } from 'lucide-react';
+import { Play, Square, Timer, Target, AlertTriangle, Activity, Loader2 } from 'lucide-react';
 import { SimulationConfig, Volatility } from '../types';
 
 interface SimulationControlProps {
-  onStart: (price: number, hours: number, minutes: number, volatility: Volatility) => void;
+  onStart: (price: number, hours: number, minutes: number, volatility: Volatility) => Promise<void>; // Updated to Promise
   onStop: () => void;
   isSimulating: boolean;
   currentPrice: number;
@@ -22,8 +22,9 @@ export const SimulationControl: React.FC<SimulationControlProps> = ({
   const [minutes, setMinutes] = useState<string>('5');
   const [volatility, setVolatility] = useState<Volatility>(Volatility.MEDIUM);
   const [error, setError] = useState<string | null>(null);
+  const [isStarting, setIsStarting] = useState(false);
 
-  const handleStart = () => {
+  const handleStart = async () => {
     setError(null);
     const price = parseFloat(targetPrice);
     const h = parseInt(hours, 10) || 0;
@@ -38,7 +39,9 @@ export const SimulationControl: React.FC<SimulationControlProps> = ({
       return;
     }
 
-    onStart(price, h, m, volatility);
+    setIsStarting(true);
+    await onStart(price, h, m, volatility);
+    setIsStarting(false);
   };
 
   const calculateProgress = () => {
@@ -147,9 +150,10 @@ export const SimulationControl: React.FC<SimulationControlProps> = ({
             {/* Action Button */}
             <button
               onClick={handleStart}
-              className="lg:w-auto w-full bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold py-3 px-8 rounded-xl transition-all shadow-lg shadow-emerald-900/40 active:scale-[0.98] flex items-center justify-center gap-2"
+              disabled={isStarting}
+              className={`lg:w-auto w-full bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold py-3 px-8 rounded-xl transition-all shadow-lg shadow-emerald-900/40 active:scale-[0.98] flex items-center justify-center gap-2 ${isStarting ? 'opacity-50 cursor-not-allowed' : ''}`}
             >
-              <Play size={20} fill="currentColor" />
+              {isStarting ? <Loader2 size={20} className="animate-spin" /> : <Play size={20} fill="currentColor" />}
               <span>СТАРТ</span>
             </button>
           </div>

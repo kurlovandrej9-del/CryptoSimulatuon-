@@ -7,6 +7,7 @@ import { Coin, DataPoint, SimulationConfig, TimeFrame, Volatility } from './type
 import { Menu, X, CloudLightning, Database, Share2 } from 'lucide-react';
 import { api } from './services/api';
 import { storage } from './services/storage';
+import { supabase } from './services/supabaseClient';
 
 const COINS: Coin[] = [
   { id: 'btc', symbol: 'BTC', name: 'Bitcoin', color: '#f59e0b', basePrice: 65000 },
@@ -33,8 +34,12 @@ interface WidgetConfig {
     enabled: boolean;
     bgColor: string;
     lineColor?: string;
+    textColor?: string;
     showHeader: boolean;
     showTimeframes: boolean;
+    showGrid: boolean;
+    strokeWidth: number;
+    fillOpacity: number;
 }
 
 const App: React.FC = () => {
@@ -53,22 +58,29 @@ const App: React.FC = () => {
       enabled: false, 
       bgColor: 'transparent',
       showHeader: true,
-      showTimeframes: false 
+      showTimeframes: false,
+      showGrid: true,
+      strokeWidth: 2,
+      fillOpacity: 0.15
   });
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+
+  // Controller State
+  const [isController, setIsController] = useState(false);
 
   // Refs
   const chartDataRef = useRef<DataPoint[]>([]);
   const simulationRef = useRef<SimulationConfig | null>(null);
   const selectedCoinRef = useRef<Coin>(COINS[0]);
   const realPriceRef = useRef<number>(0);
+  const isControllerRef = useRef(false);
 
   // --- Initialization & Data Fetching ---
 
   const loadMarketData = async (coin: Coin) => {
     setIsLoading(true);
     try {
-      // 1. Fetch Real History
+      // 1. Fetch Real History (Base)
       const history = await api.getHistory(coin.symbol, 2000);
       
       if (history.length > 0) {
@@ -77,53 +89,23 @@ const App: React.FC = () => {
       
       let finalData = history;
       
-      // 2. Check for Active Simulation to reconstruct history gap
+      // 2. Check for Active Simulation
       const sim = simulationRef.current;
       
       if (sim && sim.active && history.length > 0) {
-          const now = Date.now();
+          let dbPoints: DataPoint[] = [];
+          if (sim.supabaseId) {
+              dbPoints = await api.getSimulationPoints(sim.supabaseId);
+          }
+
           const splitIndex = history.findIndex(p => p.time >= sim.startTime);
           const cleanHistory = splitIndex !== -1 ? history.slice(0, splitIndex) : history;
-          
-          const gapPoints: DataPoint[] = [];
-          const step = 60 * 1000;
-          let currentTime = sim.startTime;
-          let currentSimPrice = sim.startPrice; 
-          
-          let volBase = 0.0005;
-          if (sim.volatility === Volatility.LOW) volBase = 0.0001;
-          if (sim.volatility === Volatility.HIGH) volBase = 0.002;
 
-          while (currentTime < now) {
-             const elapsed = currentTime - sim.startTime;
-             if (elapsed >= sim.durationMs) break;
-             
-             const remaining = sim.durationMs - elapsed;
-             const gap = sim.targetPrice - currentSimPrice;
-             
-             const stepSeconds = step / 1000;
-             const stepsLeft = Math.max(1, remaining / step);
-             const trend = gap / stepsLeft;
-             
-             const volatility = currentSimPrice * volBase * Math.sqrt(stepSeconds);
-             const noise = (Math.random() - 0.5) * volatility * 2; 
-
-             currentSimPrice += trend + noise;
-             
-             gapPoints.push({
-                 time: currentTime,
-                 price: currentSimPrice,
-                 isSimulation: true
-             });
-             
-             currentTime += step;
+          if (dbPoints.length > 0) {
+              finalData = [...cleanHistory, ...dbPoints];
+          } else if (isControllerRef.current) {
+              finalData = cleanHistory;
           }
-          
-          if (gapPoints.length === 0 && cleanHistory.length === 0) {
-               gapPoints.push({ time: sim.startTime, price: sim.startPrice, isSimulation: true });
-          }
-
-          finalData = [...cleanHistory, ...gapPoints];
       } else if (history.length === 0) {
           generateMockHistory(coin);
           return;
@@ -162,10 +144,11 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
-    // 1. Check for URL Params (Widget Mode)
+    // 1. Check for URL Params (Widget Mode / Shared Link)
     const params = new URLSearchParams(window.location.search);
     const mode = params.get('mode');
     const coinId = params.get('coin');
+    const simId = params.get('sim_id');
     
     // Parse Widget Styles
     const isWidget = mode === 'widget';
@@ -174,11 +157,13 @@ const App: React.FC = () => {
             enabled: true,
             bgColor: params.get('bg') || 'transparent',
             lineColor: params.get('line') || undefined,
-            showHeader: params.get('header') !== 'false', // Default true
-            showTimeframes: params.get('tf') === 'true' // Default false
+            textColor: params.get('txt') || undefined,
+            showHeader: params.get('header') !== 'false',
+            showTimeframes: params.get('tf') === 'true',
+            showGrid: params.get('grid') !== 'false',
+            strokeWidth: parseFloat(params.get('w_strk') || '1.5'),
+            fillOpacity: parseFloat(params.get('w_fill') || '0.15')
         });
-        
-        // Default timeframe for widget if not specified
         setActiveTimeFrame(TimeFrame.H1);
     }
 
@@ -191,49 +176,99 @@ const App: React.FC = () => {
     setSelectedCoin(initialCoin);
     selectedCoinRef.current = initialCoin;
 
-    // 3. Resolve Simulation (From URL or Storage)
-    if (params.get('sim_active') === 'true') {
-        const startPrice = parseFloat(params.get('sim_start') || '0');
-        const targetPrice = parseFloat(params.get('sim_target') || '0');
-        const startTime = parseInt(params.get('sim_startTime') || Date.now().toString());
-        const durationMs = parseInt(params.get('sim_duration') || '3600000');
-        const volatility = (params.get('sim_volatility') as Volatility) || Volatility.MEDIUM;
+    const init = async () => {
+        // 3. Resolve Simulation
+        if (simId) {
+            const { data: simData, error } = await supabase
+                .from('simulations')
+                .select('*')
+                .eq('id', simId)
+                .single();
+            
+            if (simData && !error) {
+                let vol = Volatility.MEDIUM;
+                if (simData.volatility === 'low') vol = Volatility.LOW;
+                if (simData.volatility === 'high') vol = Volatility.HIGH;
 
-        const urlSim: SimulationConfig = {
-            id: 'widget-sim',
-            active: true,
-            coinId: initialCoin.id,
-            startPrice,
-            targetPrice,
-            startTime,
-            durationMs,
-            endTime: startTime + durationMs,
-            volatility,
-            createdAt: startTime
-        };
+                const dbSim: SimulationConfig = {
+                    id: simData.id,
+                    supabaseId: simData.id,
+                    active: simData.is_active,
+                    coinId: simData.coin_id,
+                    startPrice: parseFloat(simData.start_price),
+                    targetPrice: parseFloat(simData.target_price),
+                    startTime: parseInt(simData.start_time),
+                    durationMs: parseInt(simData.duration_ms),
+                    endTime: parseInt(simData.end_time),
+                    volatility: vol,
+                    createdAt: new Date(simData.created_at).getTime()
+                };
 
-        if (Date.now() < urlSim.endTime + 60000) {
-             setSimulation(urlSim);
-             simulationRef.current = urlSim;
-        }
-    } else if (!isWidget) {
-        const savedSim = storage.getSimulation();
-        if (savedSim) {
-            const now = Date.now();
-            if (now < savedSim.endTime + 60000) { 
-                setSimulation(savedSim);
-                simulationRef.current = savedSim;
-                const coin = COINS.find(c => c.id === savedSim.coinId) || initialCoin;
-                setSelectedCoin(coin);
-                selectedCoinRef.current = coin;
-            } else {
-                storage.clearSimulation();
-                storage.archiveSimulation(savedSim);
+                if (Date.now() < dbSim.endTime + 60000) {
+                     setSimulation(dbSim);
+                     simulationRef.current = dbSim;
+                     setIsController(false);
+                     isControllerRef.current = false;
+                     
+                     const linkedCoin = COINS.find(c => c.id === dbSim.coinId);
+                     if (linkedCoin) {
+                         setSelectedCoin(linkedCoin);
+                         selectedCoinRef.current = linkedCoin;
+                     }
+                }
+            }
+        } 
+        else if (params.get('sim_active') === 'true') {
+            const startPrice = parseFloat(params.get('sim_start') || '0');
+            const targetPrice = parseFloat(params.get('sim_target') || '0');
+            const startTime = parseInt(params.get('sim_startTime') || Date.now().toString());
+            const durationMs = parseInt(params.get('sim_duration') || '3600000');
+            const volatility = (params.get('sim_volatility') as Volatility) || Volatility.MEDIUM;
+
+            const urlSim: SimulationConfig = {
+                id: 'widget-sim',
+                active: true,
+                coinId: initialCoin.id,
+                startPrice,
+                targetPrice,
+                startTime,
+                durationMs,
+                endTime: startTime + durationMs,
+                volatility,
+                createdAt: startTime
+            };
+
+            if (Date.now() < urlSim.endTime + 60000) {
+                 setSimulation(urlSim);
+                 simulationRef.current = urlSim;
+                 setIsController(false);
+                 isControllerRef.current = false;
+            }
+        } 
+        else if (!isWidget) {
+            const savedSim = storage.getSimulation();
+            if (savedSim) {
+                const now = Date.now();
+                if (now < savedSim.endTime + 60000) { 
+                    setSimulation(savedSim);
+                    simulationRef.current = savedSim;
+                    setIsController(true);
+                    isControllerRef.current = true;
+
+                    const coin = COINS.find(c => c.id === savedSim.coinId) || initialCoin;
+                    setSelectedCoin(coin);
+                    selectedCoinRef.current = coin;
+                } else {
+                    storage.clearSimulation();
+                    storage.archiveSimulation(savedSim);
+                }
             }
         }
-    }
 
-    loadMarketData(selectedCoinRef.current);
+        loadMarketData(selectedCoinRef.current);
+    };
+
+    init();
 
     if (!isWidget) {
         COINS.forEach(async (c) => {
@@ -244,6 +279,47 @@ const App: React.FC = () => {
         });
     }
   }, []);
+
+  // --- Realtime Subscription for Viewers ---
+  useEffect(() => {
+    const sim = simulationRef.current;
+    
+    if (sim?.supabaseId && !isControllerRef.current) {
+        const channel = supabase.channel('sim-updates')
+            .on(
+                'postgres_changes',
+                {
+                    event: 'INSERT',
+                    schema: 'public',
+                    table: 'simulation_points',
+                    filter: `simulation_id=eq.${sim.supabaseId}`
+                },
+                (payload) => {
+                    const newPoint: DataPoint = {
+                        time: parseInt(payload.new.time),
+                        price: parseFloat(payload.new.price),
+                        isSimulation: true
+                    };
+                    
+                    setChartData(prev => {
+                        const newData = [...prev, newPoint].slice(-3000);
+                        chartDataRef.current = newData;
+                        return newData;
+                    });
+                    
+                    setCurrentPrices(prev => ({ 
+                        ...prev, 
+                        [sim.coinId]: newPoint.price 
+                    }));
+                }
+            )
+            .subscribe();
+
+        return () => {
+            supabase.removeChannel(channel);
+        };
+    }
+  }, [simulation?.supabaseId, isController]);
 
   const handleCoinSelect = (coin: Coin) => {
     if (simulation) {
@@ -261,13 +337,35 @@ const App: React.FC = () => {
       setActiveTimeFrame(tf);
   };
 
-  const startSimulation = (targetPrice: number, hours: number, minutes: number, volatility: Volatility) => {
+  const startSimulation = async (targetPrice: number, hours: number, minutes: number, volatility: Volatility) => {
     const durationMs = (hours * 60 * 60 * 1000) + (minutes * 60 * 1000);
     const now = Date.now();
     const currentPrice = chartDataRef.current[chartDataRef.current.length - 1]?.price || selectedCoinRef.current.basePrice;
 
+    const { data: simData, error } = await supabase
+        .from('simulations')
+        .insert({
+            coin_id: selectedCoinRef.current.id,
+            start_price: currentPrice,
+            target_price: targetPrice,
+            start_time: now,
+            duration_ms: durationMs,
+            end_time: now + durationMs,
+            volatility: volatility,
+            is_active: true
+        })
+        .select()
+        .single();
+
+    if (error || !simData) {
+        console.error("Failed to start simulation", error);
+        alert("Ошибка при создании симуляции");
+        return;
+    }
+
     const config: SimulationConfig = {
-      id: crypto.randomUUID(),
+      id: simData.id,
+      supabaseId: simData.id,
       active: true,
       coinId: selectedCoinRef.current.id,
       startPrice: currentPrice,
@@ -282,20 +380,35 @@ const App: React.FC = () => {
     setIsReverting(false);
     setSimulation(config);
     simulationRef.current = config;
+    
+    setIsController(true);
+    isControllerRef.current = true;
+    
     if (!widgetConfig.enabled) storage.saveSimulation(config);
   };
 
-  const stopSimulation = () => {
-    if (simulationRef.current && !widgetConfig.enabled) {
-        storage.archiveSimulation(simulationRef.current);
-        storage.clearSimulation();
+  const stopSimulation = async () => {
+    if (simulationRef.current) {
+        if (simulationRef.current.supabaseId && isControllerRef.current) {
+            await supabase
+                .from('simulations')
+                .update({ is_active: false })
+                .eq('id', simulationRef.current.supabaseId);
+        }
+
+        if (!widgetConfig.enabled) {
+            storage.archiveSimulation(simulationRef.current);
+            storage.clearSimulation();
+        }
     }
     setSimulation(null);
     simulationRef.current = null;
+    setIsController(false);
+    isControllerRef.current = false;
     setIsReverting(true);
   };
 
-  // --- Main Engine Loop ---
+  // --- Main Engine Loop (Controller Only) ---
   useEffect(() => {
     const interval = setInterval(async () => {
       const now = Date.now();
@@ -313,7 +426,7 @@ const App: React.FC = () => {
          if (p) realPriceRef.current = p;
       }
 
-      if (sim && sim.active) {
+      if (sim && sim.active && isControllerRef.current) {
         setIsLive(false);
         const elapsed = now - sim.startTime;
         
@@ -341,8 +454,20 @@ const App: React.FC = () => {
 
           nextPrice = lastPoint.price + trendStep + (randomShock * jerkMultiplier);
           isSimulatedPoint = true;
+          
+          if (sim.supabaseId) {
+             supabase.from('simulation_points').insert({
+                 simulation_id: sim.supabaseId,
+                 time: now,
+                 price: nextPrice,
+                 is_simulation: true
+             }).then(({ error }) => {
+                 if(error) console.error("Error saving point", error);
+             });
+          }
         }
-      } else if (isReverting) {
+      } 
+      else if (isReverting) {
         setIsLive(false);
         const target = realPriceRef.current;
         const diff = target - lastPoint.price;
@@ -353,9 +478,12 @@ const App: React.FC = () => {
             setIsReverting(false);
             nextPrice = target;
         }
-      } else {
+      } 
+      else if (!sim) {
         setIsLive(true);
         nextPrice = realPriceRef.current;
+      } else {
+        return; 
       }
 
       if (now - lastPoint.time > 1000) {
@@ -371,12 +499,15 @@ const App: React.FC = () => {
       }
     }, 1000);
     return () => clearInterval(interval);
-  }, [isReverting, widgetConfig.enabled]);
+  }, [isReverting, widgetConfig.enabled, isController]);
 
   return (
     <div 
         className={`flex flex-col h-[100dvh] overflow-hidden font-sans ${widgetConfig.enabled ? '' : 'bg-slate-950 text-slate-100'}`}
-        style={widgetConfig.enabled ? { backgroundColor: widgetConfig.bgColor === 'transparent' ? 'transparent' : widgetConfig.bgColor, color: '#e2e8f0' } : {}}
+        style={widgetConfig.enabled ? { 
+            backgroundColor: widgetConfig.bgColor === 'transparent' ? 'transparent' : widgetConfig.bgColor, 
+            color: widgetConfig.textColor || '#e2e8f0' 
+        } : {}}
     >
       
       {!widgetConfig.enabled && (
@@ -454,7 +585,11 @@ const App: React.FC = () => {
                     isWidget={widgetConfig.enabled}
                     widgetOptions={{
                         showHeader: widgetConfig.showHeader,
-                        showTimeframes: widgetConfig.showTimeframes
+                        showTimeframes: widgetConfig.showTimeframes,
+                        textColor: widgetConfig.textColor,
+                        showGrid: widgetConfig.showGrid,
+                        strokeWidth: widgetConfig.strokeWidth,
+                        fillOpacity: widgetConfig.fillOpacity
                     }}
                 />
              )}

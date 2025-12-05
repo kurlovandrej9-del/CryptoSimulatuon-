@@ -21,6 +21,10 @@ interface TradingChartProps {
   widgetOptions?: {
       showHeader: boolean;
       showTimeframes: boolean;
+      textColor?: string;
+      showGrid?: boolean;
+      strokeWidth?: number;
+      fillOpacity?: number;
   }
 }
 
@@ -31,9 +35,17 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   activeTimeFrame,
   onTimeFrameChange,
   isWidget = false,
-  widgetOptions = { showHeader: true, showTimeframes: false }
+  widgetOptions = { 
+    showHeader: true, 
+    showTimeframes: false,
+    textColor: '#94a3b8',
+    showGrid: true,
+    strokeWidth: 2,
+    fillOpacity: 0.15
+  }
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const textColor = widgetOptions.textColor || '#94a3b8'; // Default slate-400
   
   // Viewport State
   const [xDomain, setXDomain] = useState<[number, number] | null>(null);
@@ -44,9 +56,11 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   // Interaction State
   const [isDragging, setIsDragging] = useState(false);
   const [isResizingY, setIsResizingY] = useState(false);
+  const [isPinching, setIsPinching] = useState(false);
   
-  // Unified pointer tracking
+  // Refs for smooth tracking
   const lastPointerPos = useRef<{ x: number; y: number } | null>(null);
+  const lastTouchDist = useRef<number | null>(null);
 
   // Helper to calculate duration from timeframe
   const getDurationFromTimeFrame = (tf: TimeFrame) => {
@@ -93,8 +107,6 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     return date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
   };
 
-  // --- Logic Helpers ---
-
   const setTimeFrame = (tf: TimeFrame) => {
     onTimeFrameChange(tf);
     if (data.length === 0) return;
@@ -106,35 +118,22 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     setIsAutoScroll(true);
   };
 
-  // --- Unified Event Handlers (Mouse & Touch) ---
+  // --- Mobile Pinch Helpers ---
 
-  const getPointerPos = (e: React.MouseEvent | React.TouchEvent) => {
-    if ((e as React.TouchEvent).touches && (e as React.TouchEvent).touches.length > 0) {
-        return { 
-            x: (e as React.TouchEvent).touches[0].clientX, 
-            y: (e as React.TouchEvent).touches[0].clientY 
-        };
-    } else if ((e as React.MouseEvent).clientX !== undefined) {
-        return { 
-            x: (e as React.MouseEvent).clientX, 
-            y: (e as React.MouseEvent).clientY 
-        };
-    }
-    return null;
+  const getTouchDistance = (touches: React.TouchList) => {
+    if (touches.length < 2) return null;
+    const dx = touches[0].clientX - touches[1].clientX;
+    const dy = touches[0].clientY - touches[1].clientY;
+    return Math.sqrt(dx * dx + dy * dy);
   };
 
-  const handleStart = (e: React.MouseEvent | React.TouchEvent) => {
+  // --- Event Handlers (Mouse) ---
+
+  const handleMouseDown = (e: React.MouseEvent) => {
     const containerWidth = containerRef.current?.clientWidth || 0;
-    const pos = getPointerPos(e);
-    if (!pos) return;
+    const isOverYAxis = e.nativeEvent.offsetX > containerWidth - 60;
 
-    const rect = containerRef.current?.getBoundingClientRect();
-    if (!rect) return;
-
-    const relativeX = pos.x - rect.left;
-    const isOverYAxis = relativeX > containerWidth - 60;
-
-    lastPointerPos.current = pos;
+    lastPointerPos.current = { x: e.clientX, y: e.clientY };
 
     if (isOverYAxis) {
         setIsResizingY(true);
@@ -142,31 +141,122 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     } else {
         setIsDragging(true);
         setIsAutoScroll(false);
+        document.body.style.cursor = 'grabbing';
     }
   };
 
-  const handleMove = (e: React.MouseEvent | React.TouchEvent) => {
-    if ((!isDragging && !isResizingY) || !lastPointerPos.current) return;
-    if (!xDomain) return;
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if ((!isDragging && !isResizingY) || !lastPointerPos.current || !xDomain) return;
 
-    const pos = getPointerPos(e);
-    if (!pos) return;
-
-    const dx = pos.x - lastPointerPos.current.x;
-    const dy = pos.y - lastPointerPos.current.y;
-    lastPointerPos.current = pos;
+    const dx = e.clientX - lastPointerPos.current.x;
+    const dy = e.clientY - lastPointerPos.current.y;
+    lastPointerPos.current = { x: e.clientX, y: e.clientY };
 
     if (isDragging) {
         const containerWidth = containerRef.current?.clientWidth || 1;
         const duration = xDomain[1] - xDomain[0];
         const msPerPx = duration / containerWidth;
         const timeShift = dx * msPerPx; 
-
         setXDomain([xDomain[0] - timeShift, xDomain[1] - timeShift]);
     }
 
     if (isResizingY && yDomain) {
-        const scaleFactor = 1 + (dy * 0.002); 
+        const scaleFactor = 1 + (dy * 0.005); 
+        const currentMin = yDomain[0];
+        const currentMax = yDomain[1];
+        const range = currentMax - currentMin;
+        const center = currentMin + range / 2;
+        const newRange = range * scaleFactor;
+        setYDomain([center - newRange / 2, center + newRange / 2]);
+    }
+  };
+
+  const handleMouseUp = () => {
+    setIsDragging(false);
+    setIsResizingY(false);
+    lastPointerPos.current = null;
+    document.body.style.cursor = 'default';
+  };
+
+  // --- Event Handlers (Touch - Multi-touch support) ---
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    if (!xDomain) return;
+    
+    // Stop auto scroll on interaction
+    setIsAutoScroll(false);
+
+    if (e.touches.length === 2) {
+        // Start Pinch
+        const dist = getTouchDistance(e.touches);
+        if (dist) {
+            lastTouchDist.current = dist;
+            setIsPinching(true);
+            setIsDragging(false); // Disable drag while pinching
+        }
+    } else if (e.touches.length === 1) {
+        // Start Drag
+        const touch = e.touches[0];
+        const containerWidth = containerRef.current?.clientWidth || 0;
+        const rect = containerRef.current?.getBoundingClientRect();
+        
+        if (rect) {
+            const relativeX = touch.clientX - rect.left;
+            const isOverYAxis = relativeX > containerWidth - 60;
+
+            lastPointerPos.current = { x: touch.clientX, y: touch.clientY };
+
+            if (isOverYAxis) {
+                setIsResizingY(true);
+                setIsAutoY(false);
+            } else {
+                setIsDragging(true);
+            }
+        }
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (!xDomain) return;
+    
+    // 1. PINCH ZOOM (2 fingers)
+    if (e.touches.length === 2 && lastTouchDist.current) {
+        const newDist = getTouchDistance(e.touches);
+        if (newDist) {
+            const zoomFactor = lastTouchDist.current / newDist;
+            lastTouchDist.current = newDist;
+
+            // Apply Zoom
+            const currentDuration = xDomain[1] - xDomain[0];
+            const newDuration = Math.max(1000 * 60, currentDuration * zoomFactor); // Min 1 min zoom
+            
+            const center = xDomain[0] + currentDuration / 2;
+            setXDomain([center - newDuration / 2, center + newDuration / 2]);
+        }
+        return;
+    }
+
+    // 2. DRAG PAN (1 finger)
+    if (e.touches.length === 1 && isDragging && lastPointerPos.current && !isPinching) {
+        const touch = e.touches[0];
+        const dx = touch.clientX - lastPointerPos.current.x;
+        lastPointerPos.current = { x: touch.clientX, y: touch.clientY };
+
+        const containerWidth = containerRef.current?.clientWidth || 1;
+        const duration = xDomain[1] - xDomain[0];
+        const msPerPx = duration / containerWidth;
+        const timeShift = dx * msPerPx; 
+        
+        setXDomain([xDomain[0] - timeShift, xDomain[1] - timeShift]);
+    }
+    
+    // 3. Y-AXIS RESIZE (1 finger on right edge)
+    if (e.touches.length === 1 && isResizingY && lastPointerPos.current && yDomain) {
+        const touch = e.touches[0];
+        const dy = touch.clientY - lastPointerPos.current.y;
+        lastPointerPos.current = { x: touch.clientX, y: touch.clientY };
+
+        const scaleFactor = 1 + (dy * 0.005); 
         const currentMin = yDomain[0];
         const currentMax = yDomain[1];
         const range = currentMax - currentMin;
@@ -177,15 +267,21 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     }
   };
 
-  const handleEnd = () => {
+  const handleTouchEnd = () => {
     setIsDragging(false);
+    setIsPinching(false);
     setIsResizingY(false);
     lastPointerPos.current = null;
+    lastTouchDist.current = null;
   };
+
+  // --- Wheel Zoom (Desktop) ---
 
   const handleWheel = (e: React.WheelEvent) => {
     if (!xDomain) return;
-    e.preventDefault(); 
+    // Removed preventDefault here to allow page scroll if not over active area, 
+    // but typically we want to capture zoom.
+    
     const containerWidth = containerRef.current?.clientWidth || 0;
     const isOverYAxis = e.nativeEvent.offsetX > containerWidth - 60;
 
@@ -204,7 +300,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         if (isAutoScroll) setIsAutoScroll(true);
         
         const duration = xDomain[1] - xDomain[0];
-        const newDuration = Math.max(10000, duration * zoomFactor);
+        const newDuration = Math.max(60000, duration * zoomFactor); // Min 1 min
         
         if (isAutoScroll) {
              const lastTime = data[data.length - 1].time;
@@ -253,7 +349,6 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
   const currentPrice = data.length > 0 ? data[data.length - 1].price : 0;
   
-  // Decide what UI to show
   const showTopBar = !isWidget || (isWidget && widgetOptions.showTimeframes);
   const showHeaderWidget = isWidget && widgetOptions.showHeader;
 
@@ -273,7 +368,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           {(!isWidget || widgetOptions.showTimeframes) && (
           <>
             {!isWidget && <div className="h-4 w-px bg-slate-800 shrink-0"></div>}
-            <div className={`flex gap-0.5 shrink-0 rounded-lg p-0.5 ${isWidget ? 'bg-black/20' : 'bg-slate-900 border border-slate-800'}`}>
+            <div className={`flex gap-0.5 shrink-0 rounded-lg p-0.5 ${isWidget ? 'bg-black/10' : 'bg-slate-900 border border-slate-800'}`}>
                 {Object.values(TimeFrame).map((tf) => (
                 <button
                     key={tf}
@@ -281,8 +376,9 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                     className={`px-3 py-1 text-[11px] font-medium rounded-md transition-all ${
                     activeTimeFrame === tf 
                         ? 'bg-slate-700/80 text-emerald-400 shadow-sm' 
-                        : 'text-slate-500 hover:text-slate-300 hover:bg-slate-800/50'
+                        : 'hover:bg-slate-800/50'
                     }`}
+                    style={{ color: activeTimeFrame === tf ? color : textColor, opacity: activeTimeFrame === tf ? 1 : 0.6 }}
                 >
                     {tf}
                 </button>
@@ -294,16 +390,18 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         
         <div className="flex items-center gap-2 pl-2">
             <div 
-                className={`flex items-center gap-1.5 text-[10px] md:text-xs font-mono px-2 py-1 rounded-md transition-all cursor-pointer ${isAutoScroll ? 'text-emerald-500' : 'text-slate-500 hover:text-slate-300'}`} 
+                className={`flex items-center gap-1.5 text-[10px] md:text-xs font-mono px-2 py-1 rounded-md transition-all cursor-pointer ${isAutoScroll ? '' : 'opacity-60 hover:opacity-100'}`} 
+                style={{ color: isAutoScroll ? color : textColor }}
                 onClick={() => setIsAutoScroll(true)}
             >
-                <div className={`w-1.5 h-1.5 rounded-full ${isAutoScroll ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]' : 'bg-slate-700'}`}></div>
+                <div className={`w-1.5 h-1.5 rounded-full ${isAutoScroll ? 'shadow-[0_0_8px_rgba(16,185,129,0.5)]' : 'bg-slate-700'}`} style={{ backgroundColor: isAutoScroll ? color : undefined }}></div>
                 {isAutoScroll ? 'LIVE' : 'PAUSED'}
             </div>
             {(!isAutoScroll || !isAutoY) && (
                 <button 
                     onClick={() => { setIsAutoScroll(true); setIsAutoY(true); setYDomain(null); }}
-                    className="p-1.5 hover:bg-slate-800 rounded text-slate-500 hover:text-white transition-colors"
+                    className="p-1.5 hover:bg-slate-800 rounded transition-colors"
+                    style={{ color: textColor }}
                     title="Сбросить вид"
                 >
                     <RefreshCcw size={14} />
@@ -315,9 +413,9 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
       {/* Widget Only Header (Simplified) */}
       {showHeaderWidget && !showTopBar && (
-        <div className="flex items-center justify-between px-3 py-1.5 border-b border-slate-800/10">
-            <span className="text-xs font-bold opacity-80">{symbol} / USD</span>
-            <span className={`text-xs font-mono ${data.length > 1 && data[data.length-1].price >= data[data.length-2].price ? 'text-emerald-400' : 'text-rose-400'}`}>
+        <div className="flex items-center justify-between px-3 py-1.5 border-b border-slate-800/10" style={{ borderColor: `${textColor}20` }}>
+            <span className="text-xs font-bold opacity-80" style={{ color: textColor }}>{symbol} / USD</span>
+            <span className={`text-xs font-mono font-bold`} style={{ color: data.length > 1 && data[data.length-1].price >= data[data.length-2].price ? color : '#f43f5e' }}>
                 ${currentPrice.toFixed(2)}
             </span>
         </div>
@@ -326,32 +424,34 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       {/* Main Chart Container */}
       <div 
         ref={containerRef}
-        className={`flex-1 w-full min-h-0 relative touch-none select-none ${isDragging ? 'cursor-grabbing' : 'cursor-crosshair'}`}
+        className={`flex-1 w-full min-h-0 relative touch-none select-none ${isDragging || isPinching ? 'cursor-grabbing' : 'cursor-crosshair'}`}
         onWheel={handleWheel}
-        onMouseDown={handleStart}
-        onMouseMove={handleMove}
-        onMouseUp={handleEnd}
-        onMouseLeave={handleEnd}
-        onTouchStart={handleStart}
-        onTouchMove={handleMove}
-        onTouchEnd={handleEnd}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
       >
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={visibleData} margin={{ top: 20, right: 0, left: 0, bottom: 0 }}>
             <defs>
               <linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor={color} stopOpacity={0.15} />
+                <stop offset="5%" stopColor={color} stopOpacity={widgetOptions.fillOpacity ?? 0.15} />
                 <stop offset="95%" stopColor={color} stopOpacity={0} />
               </linearGradient>
             </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke="#64748b" vertical={false} opacity={0.1} />
+            {widgetOptions.showGrid !== false && (
+                <CartesianGrid strokeDasharray="3 3" stroke={textColor} vertical={false} opacity={0.1} />
+            )}
             <XAxis 
               dataKey="time" 
               type="number"
               domain={xDomain || ['auto', 'auto']}
               tickFormatter={formatTime} 
-              stroke="#64748b"
-              tick={{ fill: '#64748b', fontSize: 10, fontFamily: 'monospace', opacity: 0.7 }}
+              stroke={textColor}
+              tick={{ fill: textColor, fontSize: 10, fontFamily: 'monospace', opacity: 0.7 }}
               minTickGap={60}
               allowDataOverflow={true}
               height={30}
@@ -364,9 +464,9 @@ export const TradingChart: React.FC<TradingChartProps> = ({
               type="number"
               domain={chartYDomain} 
               tickFormatter={(val) => val.toFixed(2)}
-              stroke="#64748b"
+              stroke={textColor}
               orientation="right"
-              tick={{ fill: '#64748b', fontSize: 10, fontFamily: 'monospace', opacity: 0.7 }}
+              tick={{ fill: textColor, fontSize: 10, fontFamily: 'monospace', opacity: 0.7 }}
               width={60}
               allowDataOverflow={true}
               mirror={false}
@@ -387,13 +487,13 @@ export const TradingChart: React.FC<TradingChartProps> = ({
               labelFormatter={formatTime}
               formatter={(value: number) => [value.toFixed(2), 'Price']}
               isAnimationActive={false}
-              cursor={{ stroke: '#64748b', strokeWidth: 1, strokeDasharray: '4 4' }}
+              cursor={{ stroke: textColor, strokeWidth: 1, strokeDasharray: '4 4', opacity: 0.5 }}
             />
             <Area 
               type="monotone" 
               dataKey="price" 
               stroke={color} 
-              strokeWidth={1.5}
+              strokeWidth={widgetOptions.strokeWidth ?? 1.5}
               fillOpacity={1} 
               fill="url(#colorPrice)" 
               isAnimationActive={false} 
@@ -413,11 +513,11 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                     }px`
                 }}
             >
-                <div className={`h-[1px] w-full border-t border-dashed opacity-40 ${currentPrice > (visibleData[visibleData.length-50]?.price || 0) ? 'border-emerald-500' : 'border-rose-500'}`} style={{ borderColor: color }}></div>
+                <div className="h-[1px] w-full border-t border-dashed opacity-40" style={{ borderColor: color }}></div>
             </div>
         )}
 
-        {/* Custom Y-Axis Interaction Zone (Visual Hint) */}
+        {/* Custom Y-Axis Interaction Zone (Visual Only) */}
         {!isWidget && (
         <div 
             className="absolute top-0 right-0 bottom-[30px] w-[60px] cursor-ns-resize hover:bg-white/5 transition-colors border-l border-slate-800/50"
@@ -433,7 +533,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                     }px`
                 }}
             >
-                <div className={`text-[11px] font-mono font-bold px-1.5 py-1 rounded-[2px] text-white shadow-lg flex items-center justify-center min-w-[50px] ${currentPrice > (visibleData[visibleData.length-50]?.price || 0) ? 'bg-emerald-600' : 'bg-rose-600'}`}>
+                <div className={`text-[11px] font-mono font-bold px-1.5 py-1 rounded-[2px] text-white shadow-lg flex items-center justify-center min-w-[50px]`} style={{ backgroundColor: color }}>
                     {currentPrice.toFixed(2)}
                 </div>
             </div>
@@ -453,7 +553,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                 }}
             >
                  <div 
-                    className="text-[10px] font-mono font-bold px-1 py-0.5 rounded text-white"
+                    className="text-[10px] font-mono font-bold px-1 py-0.5 rounded text-white shadow-sm"
                     style={{ backgroundColor: color }}
                  >
                     {currentPrice.toFixed(2)}
@@ -467,7 +567,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                 className="absolute right-[80px] bottom-8 p-2 bg-slate-800/80 backdrop-blur border border-slate-700 rounded-full shadow-lg cursor-pointer hover:bg-slate-700 group transition-all"
                 onClick={() => setIsAutoScroll(true)}
             >
-                <ChevronsRight className="text-emerald-500" size={20} />
+                <ChevronsRight className="text-emerald-500" size={20} style={{ color }} />
             </div>
         )}
 

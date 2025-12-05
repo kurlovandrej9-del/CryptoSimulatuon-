@@ -1,6 +1,37 @@
 import { DataPoint, BinanceKline } from '../types';
+import { supabase } from './supabaseClient';
 
-const BASE_URL = 'https://api.binance.com/api/v3';
+const BASE_URLS = [
+  'https://data-api.binance.vision/api/v3', // Try public vision API first (often better CORS)
+  'https://api.binance.com/api/v3'
+];
+
+/**
+ * Helper to fetch data with failover support (Primary -> Secondary -> Proxy)
+ */
+async function fetchWithFailover(endpoint: string, queryString: string): Promise<any> {
+    const targets = [
+        ...BASE_URLS.map(base => `${base}${endpoint}?${queryString}`),
+        `https://corsproxy.io/?${encodeURIComponent(`https://api.binance.com/api/v3${endpoint}?${queryString}`)}`
+    ];
+
+    for (const url of targets) {
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 4000); // 4s timeout per request
+            
+            const response = await fetch(url, { signal: controller.signal });
+            clearTimeout(timeoutId);
+
+            if (response.ok) {
+                return await response.json();
+            }
+        } catch (e) {
+            // Silently continue to next endpoint
+        }
+    }
+    throw new Error('All API endpoints failed');
+}
 
 export const api = {
   /**
@@ -8,26 +39,17 @@ export const api = {
    */
   getHistory: async (symbol: string, limit: number = 1000): Promise<DataPoint[]> => {
     try {
-      // Convert internal symbol to Binance format (e.g. BTC -> BTCUSDT)
       const pair = `${symbol.toUpperCase()}USDT`;
-      // We use 1m interval for high granularity, but fetch more data if needed
-      // For very long timeframes in a real app, we'd switch interval to 1h/1d, 
-      // but here we want to see the "live" simulation smoothly, so we keep 1m/5m.
-      const response = await fetch(`${BASE_URL}/klines?symbol=${pair}&interval=1m&limit=${limit}`);
-      
-      if (!response.ok) {
-        throw new Error('Network response was not ok');
-      }
+      // Use 1m interval for high granularity
+      const data: BinanceKline[] = await fetchWithFailover('/klines', `symbol=${pair}&interval=1m&limit=${limit}`);
 
-      const data: BinanceKline[] = await response.json();
-
-      return data.map((kline) => ({
+      return data.map((kline: any) => ({
         time: kline[0],
         price: parseFloat(kline[4]), // Close price
         isSimulation: false
       }));
     } catch (error) {
-      console.error('Failed to fetch history:', error);
+      console.warn('Failed to fetch history (using mock data):', error);
       return [];
     }
   },
@@ -38,17 +60,35 @@ export const api = {
   getPrice: async (symbol: string): Promise<number | null> => {
     try {
       const pair = `${symbol.toUpperCase()}USDT`;
-      const response = await fetch(`${BASE_URL}/ticker/price?symbol=${pair}`);
-      
-      if (!response.ok) {
-        throw new Error('Network response was not ok');
-      }
-
-      const data = await response.json();
+      const data = await fetchWithFailover('/ticker/price', `symbol=${pair}`);
       return parseFloat(data.price);
     } catch (error) {
-      console.error('Failed to fetch price:', error);
+      // Suppress logging to avoid console spam during connection issues
       return null;
+    }
+  },
+
+  /**
+   * Fetch stored simulation points from Supabase
+   */
+  getSimulationPoints: async (simulationId: string): Promise<DataPoint[]> => {
+    try {
+      const { data, error } = await supabase
+        .from('simulation_points')
+        .select('time, price, is_simulation')
+        .eq('simulation_id', simulationId)
+        .order('time', { ascending: true });
+
+      if (error) throw error;
+      
+      return data ? data.map(d => ({
+        time: Number(d.time),
+        price: Number(d.price),
+        isSimulation: d.is_simulation
+      })) : [];
+    } catch (error) {
+      console.error('Failed to fetch simulation points:', error);
+      return [];
     }
   }
 };

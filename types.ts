@@ -19,7 +19,8 @@ export enum Volatility {
 }
 
 export interface SimulationConfig {
-  id: string; // Unique ID for storage
+  id: string; // Internal ID
+  supabaseId?: string; // ID of the record in Supabase
   active: boolean;
   coinId: string;
   startPrice: number;
