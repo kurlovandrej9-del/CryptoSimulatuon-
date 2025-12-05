@@ -270,22 +270,39 @@ const App: React.FC = () => {
 
     init();
 
+    // Initial Tickers Load
     if (!isWidget) {
+        supabase.from('tickers').select('*').then(({ data }) => {
+            if (data) {
+                const prices: Record<string, number> = {};
+                data.forEach((t: any) => {
+                    const c = COINS.find(coin => coin.symbol === t.symbol);
+                    if (c) prices[c.id] = t.price;
+                });
+                setCurrentPrices(prev => ({ ...prev, ...prices }));
+            }
+        });
+
+        // If ticker data missing/stale, fetch from API
         COINS.forEach(async (c) => {
-        const price = await api.getPrice(c.symbol);
-        if (price) {
-            setCurrentPrices(prev => ({ ...prev, [c.id]: price }));
-        }
+           if (!currentPrices[c.id]) {
+               const price = await api.getPrice(c.symbol);
+               if (price) {
+                   setCurrentPrices(prev => ({ ...prev, [c.id]: price }));
+               }
+           }
         });
     }
   }, []);
 
   // --- Realtime Subscription for Viewers ---
   useEffect(() => {
+    // 1. Simulation Points Subscription
     const sim = simulationRef.current;
+    let pointsChannel = null;
     
     if (sim?.supabaseId && !isControllerRef.current) {
-        const channel = supabase.channel('sim-updates')
+        pointsChannel = supabase.channel('sim-updates')
             .on(
                 'postgres_changes',
                 {
@@ -314,11 +331,30 @@ const App: React.FC = () => {
                 }
             )
             .subscribe();
-
-        return () => {
-            supabase.removeChannel(channel);
-        };
     }
+
+    // 2. Global Tickers Subscription (For CoinList)
+    const tickersChannel = supabase.channel('tickers-all')
+        .on(
+            'postgres_changes',
+            { event: '*', schema: 'public', table: 'tickers' },
+            (payload) => {
+                const newRecord = payload.new as any;
+                if (!newRecord || !newRecord.symbol) return;
+
+                const { symbol, price } = newRecord;
+                const coin = COINS.find(c => c.symbol === symbol);
+                if (coin) {
+                    setCurrentPrices(prev => ({ ...prev, [coin.id]: Number(price) }));
+                }
+            }
+        )
+        .subscribe();
+
+    return () => {
+        if (pointsChannel) supabase.removeChannel(pointsChannel);
+        supabase.removeChannel(tickersChannel);
+    };
   }, [simulation?.supabaseId, isController]);
 
   const handleCoinSelect = (coin: Coin) => {
@@ -456,6 +492,7 @@ const App: React.FC = () => {
           isSimulatedPoint = true;
           
           if (sim.supabaseId) {
+             // 1. Insert Point
              supabase.from('simulation_points').insert({
                  simulation_id: sim.supabaseId,
                  time: now,
@@ -463,6 +500,17 @@ const App: React.FC = () => {
                  is_simulation: true
              }).then(({ error }) => {
                  if(error) console.error("Error saving point", error);
+             });
+
+             // 2. Update Ticker (Public List Price)
+             // Throttled slightly or just send every tick (1s is fine for simple app)
+             supabase.from('tickers').upsert({
+                 symbol: selectedCoinRef.current.symbol,
+                 price: nextPrice,
+                 is_simulation: true,
+                 updated_at: new Date().toISOString()
+             }).then(({ error }) => {
+                 if(error) console.error("Error updating ticker", error);
              });
           }
         }
