@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, Copy, Check, Code, Globe, Link as LinkIcon, Settings, Palette, Layout, Grid, Type, Sliders, Database, Terminal, CloudLightning, Activity } from 'lucide-react';
+import { X, Copy, Check, Code, Link as LinkIcon, Settings, Palette, Layout, Grid, Type, Sliders, Database, Terminal, CloudLightning, Activity } from 'lucide-react';
 import { SimulationConfig } from '../types';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from '../services/supabaseClient';
 
